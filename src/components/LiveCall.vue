@@ -18,9 +18,10 @@ const emit = defineEmits<{
 const liveMode = defineModel<'audio' | 'video'>('liveMode')
 const facingMode = defineModel<'user' | 'environment'>('facingMode')
 const videoRef = ref<HTMLVideoElement | null>(null)
-const mediaStream = ref<MediaStream | null>(null)
-const cleanupRegister = ref<Array<() => void>>([])
 const isRecording = ref(false)
+
+let mediaStream: MediaStream | null = null
+let cleanupRegister: Array<() => void> = []
 
 // 在组件挂载时初始化媒体流
 onMounted(async () => {
@@ -56,7 +57,7 @@ const initMediaStream = async () => {
           }
         : false,
   })
-  mediaStream.value = stream
+  mediaStream = stream
   await new Promise<void>((resolve) => {
     if (liveMode.value === 'video' && videoRef.value) {
       videoRef.value.srcObject = stream
@@ -72,7 +73,7 @@ const initMediaStream = async () => {
 
 // 捕捉用户的麦克风数据流并转换为wav格式的音频
 const captureAudio = () => {
-  if (!mediaStream.value) {
+  if (!mediaStream) {
     console.warn('No media stream available')
     return
   }
@@ -80,7 +81,7 @@ const captureAudio = () => {
   emit('startRecordAudio')
   const audioContext = new AudioContext()
   const analyser = audioContext.createAnalyser()
-  const audioSource = audioContext.createMediaStreamSource(mediaStream.value)
+  const audioSource = audioContext.createMediaStreamSource(mediaStream)
   audioSource.connect(analyser)
   analyser.connect(audioContext.destination)
   let executor: number | null = null
@@ -111,7 +112,7 @@ const captureAudio = () => {
     audioCallbackId = requestAnimationFrame(detactVolume)
   }
   // 获取音频数据并转化为wav格式的文件并播放
-  const recorder = new MediaRecorder(mediaStream.value)
+  const recorder = new MediaRecorder(mediaStream)
   recorder.start()
   recorder.ondataavailable = async (event) => {
     if (event.data.size === 0) {
@@ -121,7 +122,7 @@ const captureAudio = () => {
     emit('audioUpdate', audioBlob)
   }
   audioCallbackId = requestAnimationFrame(detactVolume)
-  cleanupRegister.value.push(() => {
+  cleanupRegister.push(() => {
     if (audioCallbackId) {
       cancelAnimationFrame(audioCallbackId)
       audioCallbackId = null
@@ -140,7 +141,7 @@ const captureAudio = () => {
 
 // 捕捉用户的摄像头数据流并转换为图片
 const captureVideo = () => {
-  if (!mediaStream.value || !videoRef.value) {
+  if (!mediaStream || !videoRef.value) {
     console.warn('No media stream available')
     return
   }
@@ -159,7 +160,7 @@ const captureVideo = () => {
     }
   }
   videoCallbackId = videoRef.value.requestVideoFrameCallback(drawImage)
-  cleanupRegister.value.push(() => {
+  cleanupRegister.push(() => {
     if (videoCallbackId) {
       videoRef.value?.cancelVideoFrameCallback(videoCallbackId)
       videoCallbackId = null
@@ -181,14 +182,14 @@ const startCapture = () => {
 
 /** 清理资源 */
 const cleanup = () => {
-  if (mediaStream.value) {
-    mediaStream.value.getTracks().forEach((track) => {
+  if (mediaStream) {
+    mediaStream.getTracks().forEach((track) => {
       track.stop()
     })
-    mediaStream.value = null
+    mediaStream = null
   }
-  cleanupRegister.value.forEach((fn) => fn())
-  cleanupRegister.value = []
+  cleanupRegister.forEach((fn) => fn())
+  cleanupRegister = []
   isRecording.value = false
 }
 
@@ -202,7 +203,7 @@ defineExpose({
   <template v-if="liveMode === 'audio'">
     <slot></slot>
   </template>
-  <video v-else ref="videoRef" autoplay muted controls="false"></video>
+  <video v-else ref="videoRef" autoplay muted disable-picture-in-picture :controls="false"></video>
 </template>
 
 <style scoped>

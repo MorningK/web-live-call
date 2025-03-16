@@ -1,13 +1,17 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref } from 'vue'
+import { nextTick, onBeforeMount, onMounted, ref } from 'vue'
 import { useToast } from 'vue-toast-notification'
+import { getWaveBlob } from 'webm-to-wav-converter'
 
 const mode = ref<'audio' | 'video'>('audio')
 // 创建一个判断是否前置摄像头的ref
 const isFrontCamera = ref<boolean>(false)
 const videoRef = ref<HTMLVideoElement | null>(null)
+const imageRef = ref<HTMLImageElement | null>(null)
 // mediaStream的ref
 const mediaStream = ref<MediaStream | null>(null)
+const cleanupRegister = ref<Array<() => void>>([])
+const isRecording = ref(false)
 const toast = useToast()
 
 // 在组件挂载时初始化媒体流
@@ -15,9 +19,14 @@ onMounted(() => {
   initMediaStream()
 })
 
+onBeforeMount(() => {
+  cleanup()
+})
+
 // 实现切换mode的方法
 const toggleMode = async () => {
   mode.value = mode.value === 'audio' ? 'video' : 'audio'
+  cleanup()
   await nextTick()
   await initMediaStream()
 }
@@ -38,12 +47,18 @@ const initMediaStream = async () => {
   mediaStream.value = stream
   if (mode.value === 'video' && videoRef.value) {
     videoRef.value.srcObject = stream
+    videoRef.value.onloadeddata = () => {
+      msg.dismiss()
+    }
+  } else {
+    msg.dismiss()
   }
-  msg.dismiss()
 }
 // 切换前置摄像头的方法
-const toggleFrontCamera = () => {
+const toggleFrontCamera = async () => {
   isFrontCamera.value = !isFrontCamera.value
+  cleanup()
+  await nextTick()
   initMediaStream()
 }
 // 捕捉用户的麦克风数据流并转换为wav格式的音频
@@ -52,46 +67,48 @@ const captureAudio = () => {
     console.warn('No media stream available')
     return
   }
+  console.log('capture audio')
   let msg = toast.info('Recording audio...', { duration: 0 })
   const audioContext = new AudioContext()
   const analyser = audioContext.createAnalyser()
-  const gain = audioContext.createGain()
   const audioSource = audioContext.createMediaStreamSource(mediaStream.value)
-  audioSource.connect(gain)
-  gain.connect(analyser)
+  audioSource.connect(analyser)
   analyser.connect(audioContext.destination)
-  function detactVolume() {
+  let executor: number | null = null
+  let audioCallbackId: number | null = null
+  const detactVolume = () => {
     const dataArray = new Uint8Array(analyser.frequencyBinCount)
     analyser.getByteFrequencyData(dataArray)
     const volume = dataArray.reduce((acc, cur) => acc + cur, 0) / dataArray.length
     console.debug('Volume:', volume)
-    if (volume > 10) {
+    if (volume > 16) {
+      if (executor) {
+        clearTimeout(executor)
+        executor = null
+      }
       if (recorder.state === 'inactive') {
+        console.log('start recording')
         recorder.start()
         msg = toast.info('Recording audio...', { duration: 0 })
       }
-    } else {
-      recorder.stop()
-      msg.dismiss()
+    } else if (recorder.state === 'recording' && executor === null) {
+      executor = setTimeout(() => {
+        console.log('stop recording')
+        recorder.stop()
+        msg.dismiss()
+        executor = null
+      }, 1000)
     }
-    requestAnimationFrame(detactVolume)
+    audioCallbackId = requestAnimationFrame(detactVolume)
   }
   // 获取音频数据并转化为wav格式的文件并播放
   const recorder = new MediaRecorder(mediaStream.value)
-  recorder.stream.getAudioTracks().forEach((track) => {
-    track.onunmute = () => {
-      console.log('Audio track unmuted', track)
-    }
-    track.onmute = () => {
-      console.log('Audio track muted', track)
-    }
-  })
   recorder.start()
-  recorder.ondataavailable = (event) => {
+  recorder.ondataavailable = async (event) => {
     if (event.data.size === 0) {
       return
     }
-    const audioBlob = new Blob([event.data])
+    const audioBlob = await getWaveBlob(event.data, false)
     const audioUrl = URL.createObjectURL(audioBlob)
     const audio = new Audio(audioUrl)
     console.log('audio play', event.data, audioBlob, audioUrl)
@@ -99,38 +116,82 @@ const captureAudio = () => {
     audio.onended = () => {
       URL.revokeObjectURL(audioUrl)
     }
+    cleanupRegister.value.push(() => {
+      audio.pause()
+      audio.onended = null
+      URL.revokeObjectURL(audioUrl)
+    })
   }
-  requestAnimationFrame(detactVolume)
+  audioCallbackId = requestAnimationFrame(detactVolume)
+  cleanupRegister.value.push(() => {
+    if (audioCallbackId) {
+      cancelAnimationFrame(audioCallbackId)
+      audioCallbackId = null
+    }
+    if (executor) {
+      clearTimeout(executor)
+      executor = null
+    }
+    recorder.stop()
+    recorder.ondataavailable = null
+    analyser.disconnect()
+    audioSource.disconnect()
+    audioContext.close()
+  })
 }
+
 // 捕捉用户的摄像头数据流并转换为图片
 const captureVideo = () => {
-  if (!mediaStream.value) {
+  if (!mediaStream.value || !videoRef.value) {
     console.warn('No media stream available')
     return
   }
   const canvas = document.createElement('canvas')
-  const videoTrack = mediaStream.value.getVideoTracks()[0]
-  const imageCapture = new ImageCapture(videoTrack)
-  imageCapture.grabFrame().then((imageBitmap) => {
-    canvas.width = imageBitmap.width
-    canvas.height = imageBitmap.height
-    const ctx = canvas.getContext('2d')
-    if (ctx) {
-      ctx.drawImage(imageBitmap, 0, 0)
-      const imageUrl = canvas.toDataURL('image/png')
-      const image = new Image()
-      image.src = imageUrl
-      document.body.appendChild(image)
+  canvas.width = videoRef.value.videoWidth
+  canvas.height = videoRef.value.videoHeight
+  const ctx = canvas.getContext('2d')
+  let videoCallbackId: number | null = null
+  const drawImage: VideoFrameRequestCallback = (now, metadata) => {
+    if (ctx && imageRef.value && videoRef.value) {
+      console.debug('draw image', now, metadata)
+      ctx.drawImage(videoRef.value, 0, 0, canvas.width, canvas.height)
+      const imageUrl = canvas.toDataURL('image/jpg')
+      imageRef.value.src = imageUrl
+      videoCallbackId = videoRef.value.requestVideoFrameCallback(drawImage)
+    }
+  }
+  videoCallbackId = videoRef.value.requestVideoFrameCallback(drawImage)
+  cleanupRegister.value.push(() => {
+    if (videoCallbackId) {
+      videoRef.value?.cancelVideoFrameCallback(videoCallbackId)
+      videoCallbackId = null
     }
   })
 }
 // 点击触发捕捉事件
 const capture = () => {
+  if (isRecording.value) {
+    cleanup()
+    return
+  }
+  isRecording.value = true
   captureAudio()
   if (mode.value === 'audio') {
   } else {
     captureVideo()
   }
+}
+
+const cleanup = () => {
+  if (mediaStream.value) {
+    mediaStream.value.getTracks().forEach((track) => {
+      track.stop()
+    })
+    mediaStream.value = null
+  }
+  cleanupRegister.value.forEach((fn) => fn())
+  cleanupRegister.value = []
+  isRecording.value = false
 }
 </script>
 
@@ -145,8 +206,9 @@ const capture = () => {
     <button @click="toggleMode">Toggle Mode</button>
     <!-- 当mode等于video时显示切换前置摄像头的按钮 -->
     <button v-if="mode === 'video'" @click="toggleFrontCamera">Toggle Front Camera</button>
-    <button @click="capture">Capture</button>
+    <button @click="capture">{{ isRecording ? 'Stop' : 'Capture' }}</button>
   </main>
+  <img v-if="mode === 'video'" ref="imageRef" />
 </template>
 
 <style scoped>

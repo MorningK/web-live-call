@@ -1,6 +1,10 @@
 <script setup lang="ts">
-import { nextTick, onBeforeMount, onMounted, ref } from 'vue'
+import { nextTick, onBeforeMount, onMounted, ref, watch } from 'vue'
 import { getWaveBlob } from 'webm-to-wav-converter'
+
+const props = defineProps<{
+  autoStartup?: boolean
+}>()
 
 const emit = defineEmits<{
   initMediaStream: []
@@ -11,33 +15,33 @@ const emit = defineEmits<{
   videoUpdate: [dataUrl: string]
 }>()
 
-const liveMode = defineModel<'audio' | 'video'>('live-mode')
+const liveMode = defineModel<'audio' | 'video'>('liveMode')
 const facingMode = defineModel<'user' | 'environment'>('facingMode')
 const videoRef = ref<HTMLVideoElement | null>(null)
-// mediaStream的ref
 const mediaStream = ref<MediaStream | null>(null)
 const cleanupRegister = ref<Array<() => void>>([])
 const isRecording = ref(false)
 
 // 在组件挂载时初始化媒体流
-onMounted(() => {
-  initMediaStream()
+onMounted(async () => {
+  await initMediaStream()
+  if (props.autoStartup) {
+    startCapture()
+  }
 })
 
 onBeforeMount(() => {
   cleanup()
 })
 
-// 实现切换mode的方法
-const changeLiveMode = async (value: typeof liveMode.value) => {
-  if (value === liveMode.value) {
-    return
-  }
-  liveMode.value = value
+watch([liveMode, facingMode], async () => {
   cleanup()
   await nextTick()
   await initMediaStream()
-}
+  if (props.autoStartup) {
+    startCapture()
+  }
+})
 
 const initMediaStream = async () => {
   emit('initMediaStream')
@@ -53,22 +57,19 @@ const initMediaStream = async () => {
         : false,
   })
   mediaStream.value = stream
-  if (liveMode.value === 'video' && videoRef.value) {
-    videoRef.value.srcObject = stream
-    videoRef.value.onloadeddata = () => {
-      emit('mediaStreamComplete')
+  await new Promise<void>((resolve) => {
+    if (liveMode.value === 'video' && videoRef.value) {
+      videoRef.value.srcObject = stream
+      videoRef.value.onloadeddata = () => {
+        resolve()
+      }
+    } else {
+      resolve()
     }
-  } else {
-    emit('mediaStreamComplete')
-  }
+  })
+  emit('mediaStreamComplete')
 }
-// 切换前置摄像头的方法
-const changeFacingMode = async (value: typeof facingMode.value) => {
-  facingMode.value = value
-  cleanup()
-  await nextTick()
-  initMediaStream()
-}
+
 // 捕捉用户的麦克风数据流并转换为wav格式的音频
 const captureAudio = () => {
   if (!mediaStream.value) {
@@ -105,7 +106,7 @@ const captureAudio = () => {
         recorder.stop()
         emit('stopRecordAudio')
         executor = null
-      }, 1000)
+      }, 500)
     }
     audioCallbackId = requestAnimationFrame(detactVolume)
   }
@@ -166,6 +167,7 @@ const captureVideo = () => {
   })
 }
 
+/** 开始捕捉音频流和视频流 */
 const startCapture = () => {
   if (isRecording.value) {
     return
@@ -177,6 +179,7 @@ const startCapture = () => {
   }
 }
 
+/** 清理资源 */
 const cleanup = () => {
   if (mediaStream.value) {
     mediaStream.value.getTracks().forEach((track) => {
@@ -190,9 +193,6 @@ const cleanup = () => {
 }
 
 defineExpose({
-  mode: liveMode,
-  changeLiveMode,
-  changeFacingMode,
   startCapture,
   cleanup,
 })
